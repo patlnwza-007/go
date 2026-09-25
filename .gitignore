@@ -1,0 +1,19 @@
+# Binaries
+go_lang_project
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Environment variables
+.env
+
+# OS files
+.DS_Store
