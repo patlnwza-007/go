@@ -3,21 +3,37 @@
 
 * **ผู้รับผิดชอบ:** นายณราธร เหมือนเหลา (คนที่ 3)
 * **รหัสนักศึกษา:** 67114540174
-* **Service Port:** `8083`
+* **Service Port:** `8083` (Path ทั้งหมดขึ้นต้นด้วย `/api/v1/`)
 * **Database:** PostgreSQL (`order_db`)
+* **Docker Network:** `food_ordering_net` (Shared External Network)
+
+---
+
+## 📋 สรุป 9 จุดที่แก้ไขและปรับปรุงตามข้อกำหนดการเชื่อม 4 Services
+1. ✅ **JWT Auth Middleware:** ตรวจสอบ Token ผ่าน `Authorization: Bearer <token>` ด้วย `JWT_SECRET` เดียวกันทั้งระบบ
+2. ✅ **`customer_id` จาก Token:** ดึงจากฟิลด์ `sub` ใน Claims ไม่รับจาก Request Body
+3. ✅ **Inter-service Call:** เรียก `GET /api/v1/menu-items/{id}` ที่ `restaurant-service:8082` เพื่อดึงชื่อและราคาจริงมาทำ Snapshot (ถ้าติดต่อไม่ได้ ตอบ 503 `RESTAURANT_SERVICE_UNAVAILABLE`)
+4. ✅ **Ownership Check:** ลูกค้าดูและยกเลิกได้เฉพาะออเดอร์ของตนเอง (ยกเว้น `admin` หรือร้านค้า)
+5. ✅ **Standard Response Envelope:** ทุก API คืนค่ารูปแบบเดียวกัน:
+   - สำเร็จ: `{"success": true, "message": "...", "data": ...}`
+   - ล้มเหลว: `{"success": false, "error": "CODE", "message": "...", "details": null}`
+6. ✅ **Status Transition Check:** ตรวจสอบลำดับสถานะ `pending → confirmed → cooking → ready → completed` ห้ามข้ามขั้น
+7. ✅ **Cancellation Rules:** ยกเลิกได้เฉพาะออเดอร์ที่สถานะเป็น `pending` หรือ `confirmed` เท่านั้น
+8. ✅ **Clean Routes:** ตัด Path ที่ไม่มี prefix `/api/v1` ออกทั้งหมด
+9. ✅ **Added Endpoints:** เพิ่ม `GET /api/v1/customers/:id/orders` และ `GET /api/v1/orders/:id/status`
 
 ---
 
 ## 🛠️ โครงสร้างไฟล์ในโปรเจกต์
-โปรเจกต์นี้ออกแบบให้เข้าใจง่าย ไม่ซับซ้อน เหมาะสำหรับส่งงานและอธิบายอาจารย์:
 ```
 go_lang_project/
-├── main.go            # เส้นทาง API (Routes) และฟังก์ชันจัดการคำสั่งซื้อ (Handlers)
-├── models.go          # โครงสร้างตาราง orders, order_items และข้อมูลผู้พัฒนา
-├── database.go        # ฟังก์ชันเชื่อมต่อ PostgreSQL (order_db) และสร้างตารางอัตโนมัติ
-├── schema.sql         # คำสั่ง SQL DDL สำหรับสร้างตาราง orders และ order_items
-├── docker-compose.yml # ไฟล์สำหรับรันฐานข้อมูล PostgreSQL บน Docker
-├── .env               # ไฟล์กำหนดค่าพอร์ตและการเชื่อมต่อฐานข้อมูล
+├── main.go            # Gin Router, Middleware, Handlers และการเรียก Restaurant Service
+├── models.go          # Structs ตาราง orders, order_items, JWT Claims, Response Envelopes
+├── database.go        # ฟังก์ชันเชื่อมต่อ PostgreSQL (order_db) และ Auto-Migrate
+├── schema.sql         # คำสั่ง SQL DDL สำหรับสร้างตาราง
+├── Dockerfile         # Multi-stage Docker build สำหรับ order-service
+├── docker-compose.yml # รันทั้ง order-db และ order-service บนเครือข่าย food_ordering_net
+├── .env               # กำหนดค่าพอร์ต, การเชื่อมต่อ DB, JWT_SECRET, Service URLs
 └── go.mod             # ไฟล์จัดการ Go Dependencies
 ```
 
@@ -25,71 +41,76 @@ go_lang_project/
 
 ## 🚀 วิธีการรันโปรเจกต์
 
-### ขั้นตอนที่ 1: เปิดฐานข้อมูล PostgreSQL
-เลือกวิธีใดวิธีหนึ่ง:
-
-**วิธี A (แนะนำ - รันผ่าน Docker):**
+### รันผ่าน Docker Compose (แนะนำสำหรับการรวมระบบ 4 Services)
 ```bash
-docker compose up -d
+# 1. ตรวจสอบ/สร้าง shared network ก่อน (รันครั้งเดียว)
+docker network create food_ordering_net
+
+# 2. สั่ง build และเปิดทั้ง database และ service
+docker compose up -d --build
 ```
 
-**วิธี B (รันผ่าน Homebrew PostgreSQL ในเครื่อง Mac):**
+### หรือรันแบบ Local (สำหรับพัฒนาในเครื่อง)
 ```bash
-brew services start postgresql@16
-createdb order_db
-```
+# 1. เปิดเฉพาะ database ผ่าน docker
+docker compose up -d order_db
 
----
-
-### ขั้นตอนที่ 2: รัน Order Service
-เปิด Terminal ในโฟลเดอร์โปรเจกต์ แล้วสั่ง:
-```bash
+# 2. รัน Go service บนเครื่อง
 go run .
 ```
-ระบบจะเชื่อมต่อฐานข้อมูล `order_db`, สร้างตารางให้อัตโนมัติ (AutoMigrate) และเปิดให้บริการที่พอร์ต `http://localhost:8083`
 
 ---
 
-## 📡 ตัวอย่างคำสั่งทดสอบ API (curl)
+## 📡 รายการ API Endpoints (ทั้งหมดอยู่ภายใต้ `/api/v1`)
 
-### 1. ดูข้อมูลผู้พัฒนา (คุณณราธร เหมือนเหลา)
+| Method | Endpoint | สิทธิ์ (Role) | คำอธิบาย |
+|---|---|---|---|
+| `GET` | `/health` | Public | ตรวจสอบสถานะ Service และ Database |
+| `GET` | `/narathon` หรือ `/api/v1/narathon` | Public | ข้อมูลผู้พัฒนา (นายณราธร เหมือนเหลา) |
+| `POST` | `/api/v1/orders` | Customer | สั่งซื้ออาหาร (ดึงราคาจริงจาก Restaurant Service) |
+| `GET` | `/api/v1/orders` | Customer/Admin | ดูรายการออเดอร์ (Customer เห็นเฉพาะของตนเอง) |
+| `GET` | `/api/v1/orders/:id` | Owner/Admin | ดูรายละเอียดออเดอร์ตามรหัส ID |
+| `GET` | `/api/v1/orders/:id/status` | Owner/Admin | ดูเฉพาะสถานะของออเดอร์ |
+| `GET` | `/api/v1/customers/:id/orders` | Owner/Admin | ดูประวัติออเดอร์ทั้งหมดของลูกค้ารายนั้น |
+| `PATCH`| `/api/v1/orders/:id/status` | Restaurant/Admin/Rider | ปรับเปลี่ยนสถานะออเดอร์ (ห้ามข้ามขั้น) |
+| `POST` | `/api/v1/orders/:id/cancel` | Customer/Admin | ขอยกเลิกออเดอร์ (เฉพาะ pending/confirmed) |
+
+---
+
+## 🧪 ตัวอย่างคำสั่งทดสอบ API ด้วย `curl`
+
+### 1. ดูข้อมูลผู้พัฒนา (Public)
 ```bash
 curl http://localhost:8083/narathon
 ```
-*หรือเปิดผ่านเบราว์เซอร์:* `http://localhost:8083/narathon`
 
 ---
 
-### 2. ตรวจสอบสถานะ Service (Health Check)
+### 2. สร้าง Token จำลองสำหรับทดสอบ (หรือรับจาก User Service Port 8081)
+เมื่อทดสอบ สามารถใช้ Token ที่ได้จากการล็อกอินที่ User Service (`http://user-service:8081/api/v1/auth/login`) หรือใช้ Token ทดสอบที่ sign ด้วย `JWT_SECRET`
+
+ตัวอย่างส่ง Header:
 ```bash
-curl http://localhost:8083/health
+TOKEN="<JWT_TOKEN>"
 ```
 
 ---
 
-### 3. สั่งซื้ออาหาร (สร้าง Order พร้อม Snapshot รายการอาหาร)
+### 3. สั่งซื้ออาหาร (`POST /api/v1/orders`)
+> สังเกต: ไม่ต้องส่ง `customer_id` (ระบบอ่านจาก Token) และไม่ต้องส่ง `unit_price`/`item_name` (ระบบดึงจาก Restaurant Service)
 ```bash
-curl -X POST http://localhost:8083/orders \
+curl -X POST http://localhost:8083/api/v1/orders \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "customer_id": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
     "restaurant_id": "b1eebc99-9c0b-4ef8-bb6d-6bb9bd380b22",
-    "delivery_address": "อาคารเรียนรวม 2 มหาวิทยาลัย",
+    "delivery_address": "อาคารเรียนรวม 2 ชั้น 3 มหาวิทยาลัย",
     "payment_method": "promptpay",
     "items": [
       {
         "menu_item_id": "c2eebc99-9c0b-4ef8-bb6d-6bb9bd380c33",
-        "item_name": "ข้าวกะเพราหมูกรอบ",
-        "unit_price": 65.00,
         "qty": 2,
-        "note": "เผ็ดน้อย ไข่ดาวสุก"
-      },
-      {
-        "menu_item_id": "d3eebc99-9c0b-4ef8-bb6d-6bb9bd380d44",
-        "item_name": "ชาไทยเย็น",
-        "unit_price": 35.00,
-        "qty": 1,
-        "note": "หวานน้อย 50%"
+        "note": "เผ็ดน้อย ไม่ใส่ผักชี"
       }
     ]
   }'
@@ -97,34 +118,28 @@ curl -X POST http://localhost:8083/orders \
 
 ---
 
-### 4. ดึงรายการออเดอร์ทั้งหมด
+### 4. ดึงสถานะออเดอร์ (`GET /api/v1/orders/:id/status`)
 ```bash
-curl http://localhost:8083/orders
-```
-*สามารถกรองตามลูกค้าได้ เช่น:* `curl "http://localhost:8083/orders?customer_id=a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"`
-
----
-
-### 5. ดูรายละเอียดออเดอร์ตาม ID
-```bash
-curl http://localhost:8083/orders/<ORDER_ID>
+curl http://localhost:8083/api/v1/orders/<ORDER_ID>/status \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 ---
 
-### 6. อัปเดตสถานะออเดอร์
-สถานะที่อนุญาต: `pending`, `confirmed`, `cooking`, `ready`, `completed`, `cancelled`
+### 5. อัปเดตสถานะออเดอร์ตามลำดับ (`PATCH /api/v1/orders/:id/status`)
+ลำดับที่ถูกต้อง: `pending` ➔ `confirmed` ➔ `cooking` ➔ `ready` ➔ `completed`
 ```bash
-curl -X PATCH http://localhost:8083/orders/<ORDER_ID>/status \
+curl -X PATCH http://localhost:8083/api/v1/orders/<ORDER_ID>/status \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{
-    "status": "cooking"
-  }'
+  -d '{"status": "confirmed"}'
 ```
 
 ---
 
-### 7. ขอยกเลิกออเดอร์
+### 6. ขอยกเลิกออเดอร์ (`POST /api/v1/orders/:id/cancel`)
+(ทำได้เฉพาะสถานะ pending หรือ confirmed)
 ```bash
-curl -X POST http://localhost:8083/orders/<ORDER_ID>/cancel
+curl -X POST http://localhost:8083/api/v1/orders/<ORDER_ID>/cancel \
+  -H "Authorization: Bearer $TOKEN"
 ```

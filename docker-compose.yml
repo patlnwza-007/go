@@ -12,6 +12,34 @@ services:
     volumes:
       - order_data:/var/lib/postgresql/data
       - ./schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
+    networks:
+      - food_ordering_net
+
+  order-service:
+    build: .
+    container_name: order-service
+    restart: always
+    ports:
+      - "8083:8083"
+    environment:
+      PORT: "8083"
+      DB_HOST: "order_postgres"
+      DB_PORT: "5432"
+      DB_USER: "postgres"
+      DB_PASSWORD: "postgres"
+      DB_NAME: "order_db"
+      JWT_SECRET: "0b78533e885cb954453e18266037bc9a80edb4227e61f7fc3f4f8e1787ce0167"
+      RESTAURANT_SERVICE_URL: "http://restaurant-service:8082"
+      USER_SERVICE_URL: "http://user-service:8081"
+    depends_on:
+      - order_db
+    networks:
+      - food_ordering_net
 
 volumes:
   order_data:
+
+networks:
+  food_ordering_net:
+    name: food_ordering_net
+    external: true

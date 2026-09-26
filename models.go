@@ -3,6 +3,7 @@ package main
 import (
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -59,17 +60,39 @@ func (item *OrderItem) BeforeCreate(tx *gorm.DB) error {
 	return nil
 }
 
-// DTO สำหรับรับข้อมูลตอนสั่งซื้ออาหาร
+// Response Envelopes ตามมาตรฐานทั้ง 4 Services
+type SuccessResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+	Data    any    `json:"data"`
+}
+
+type ErrorResponse struct {
+	Success bool   `json:"success"`
+	Error   string `json:"error"`
+	Message string `json:"message"`
+	Details any    `json:"details,omitempty"`
+}
+
+// โครงสร้าง JWT Claims ตรงตาม User Service
+type JWTClaims struct {
+	Sub   string `json:"sub"`   // user_id / customer_id
+	Email string `json:"email"` // user email
+	Role  string `json:"role"`  // customer, restaurant_owner, rider, admin
+	Jti   string `json:"jti"`
+	jwt.RegisteredClaims
+}
+
+// DTO สำหรับรับข้อมูลสั่งซื้ออาหารจาก Client
+// (ห้ามรับ customer_id จาก body - ดึงจาก token)
+// (ห้ามรับ unit_price/item_name จาก body - ดึงจาก Restaurant Service)
 type CreateOrderItemRequest struct {
-	MenuItemID string  `json:"menu_item_id" binding:"required"`
-	ItemName   string  `json:"item_name" binding:"required"`   // Snapshot ชื่อเมนู
-	UnitPrice  float64 `json:"unit_price" binding:"required"`  // Snapshot ราคา
-	Qty        int     `json:"qty" binding:"required,min=1,max=20"`
-	Note       string  `json:"note"`
+	MenuItemID string `json:"menu_item_id" binding:"required"`
+	Qty        int    `json:"qty" binding:"required,min=1,max=20"`
+	Note       string `json:"note"`
 }
 
 type CreateOrderRequest struct {
-	CustomerID      string                   `json:"customer_id" binding:"required"`
 	RestaurantID    string                   `json:"restaurant_id" binding:"required"`
 	DeliveryAddress string                   `json:"delivery_address" binding:"required"`
 	PaymentMethod   string                   `json:"payment_method" binding:"required"`
@@ -79,4 +102,16 @@ type CreateOrderRequest struct {
 // DTO สำหรับอัปเดตสถานะออเดอร์
 type UpdateStatusRequest struct {
 	Status string `json:"status" binding:"required"`
+}
+
+// โมเดลข้อมูลจาก Restaurant Service (GET /api/v1/menu-items/{id})
+type MenuItemResponse struct {
+	ID           string  `json:"id"`
+	RestaurantID string  `json:"restaurant_id"`
+	Name         string  `json:"name"`
+	Description  string  `json:"description"`
+	Price        float64 `json:"price"`
+	Category     string  `json:"category"`
+	ImageURL     string  `json:"image_url"`
+	Available    bool    `json:"available"`
 }
