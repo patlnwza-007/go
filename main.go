@@ -234,8 +234,11 @@ func main() {
 
 	// Public Routes
 	r.GET("/health", healthHandler)
+	r.GET("/healthz", healthHandler)
 	r.GET("/narathon", studentHandler)
 	r.GET("/api/v1/narathon", studentHandler)
+	r.GET("/api/v1/health", healthHandler)
+	r.GET("/api/v1/healthz", healthHandler)
 
 	// API v1 Group (ลบเส้นทางที่ไม่มี /api/v1 ออกทั้งหมด)
 	api := r.Group("/api/v1")
