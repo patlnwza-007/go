@@ -115,3 +115,11 @@ type MenuItemResponse struct {
 	ImageURL     string  `json:"image_url"`
 	Available    bool    `json:"available"`
 }
+
+// โมเดลข้อมูลร้านอาหารจาก Restaurant Service (GET /api/v1/restaurants/{id})
+type RestaurantResponse struct {
+	ID      string `json:"id"`
+	OwnerID string `json:"owner_id"`
+	Name    string `json:"name"`
+	Status  string `json:"status"`
+}

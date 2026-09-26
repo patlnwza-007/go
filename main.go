@@ -44,7 +44,7 @@ func respondError(c *gin.Context, code int, errCode string, message string, deta
 }
 
 // -----------------------------------------------------------------------------
-// JWT Authentication Middleware (จุดที่ 1)
+// JWT Authentication Middleware
 // -----------------------------------------------------------------------------
 
 func authMiddleware() gin.HandlerFunc {
@@ -90,14 +90,16 @@ func authMiddleware() gin.HandlerFunc {
 }
 
 // -----------------------------------------------------------------------------
-// Inter-service Communication: เรียก Restaurant Service ดึงข้อมูลเมนู (จุดที่ 3)
+// Inter-service Communication: เรียก Restaurant Service
 // -----------------------------------------------------------------------------
 
 var (
 	ErrRestaurantUnavailable = errors.New("restaurant service unavailable")
+	ErrRestaurantNotFound    = errors.New("restaurant not found")
 	ErrMenuItemNotFound      = errors.New("menu item not found")
 )
 
+// ดึงข้อมูลเมนูอาหาร (GET /api/v1/menu-items/{id})
 func fetchMenuItem(menuItemID string) (*MenuItemResponse, error) {
 	baseURL := strings.TrimRight(getEnv("RESTAURANT_SERVICE_URL", "http://restaurant-service:8082"), "/")
 	url := fmt.Sprintf("%s/api/v1/menu-items/%s", baseURL, menuItemID)
@@ -126,7 +128,6 @@ func fetchMenuItem(menuItemID string) (*MenuItemResponse, error) {
 		return nil, err
 	}
 
-	// รองรับทั้งแบบครอบ envelope { "data": { ... } } และแบบส่งตรง { ... }
 	var envelope struct {
 		Success bool              `json:"success"`
 		Data    *MenuItemResponse `json:"data"`
@@ -143,8 +144,53 @@ func fetchMenuItem(menuItemID string) (*MenuItemResponse, error) {
 	return nil, errors.New("invalid menu item response format")
 }
 
+// ดึงข้อมูลร้านอาหาร (GET /api/v1/restaurants/{id}) เพื่อตรวจสอบ owner_id
+func fetchRestaurant(restaurantID string) (*RestaurantResponse, error) {
+	baseURL := strings.TrimRight(getEnv("RESTAURANT_SERVICE_URL", "http://restaurant-service:8082"), "/")
+	url := fmt.Sprintf("%s/api/v1/restaurants/%s", baseURL, restaurantID)
+
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+	}
+
+	resp, err := client.Get(url)
+	if err != nil {
+		log.Printf("⚠️ ไม่สามารถติดต่อ Restaurant Service ที่ %s: %v", url, err)
+		return nil, ErrRestaurantUnavailable
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, ErrRestaurantNotFound
+	}
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("⚠️ Restaurant Service ตอบกลับสถานะ %d จาก URL %s", resp.StatusCode, url)
+		return nil, ErrRestaurantUnavailable
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var envelope struct {
+		Success bool                `json:"success"`
+		Data    *RestaurantResponse `json:"data"`
+	}
+	if err := json.Unmarshal(bodyBytes, &envelope); err == nil && envelope.Data != nil && envelope.Data.OwnerID != "" {
+		return envelope.Data, nil
+	}
+
+	var direct RestaurantResponse
+	if err := json.Unmarshal(bodyBytes, &direct); err == nil && direct.OwnerID != "" {
+		return &direct, nil
+	}
+
+	return nil, errors.New("invalid restaurant response format")
+}
+
 // -----------------------------------------------------------------------------
-// State Machine: ตรวจสอบลำดับขั้นตอนสถานะออเดอร์ (จุดที่ 6)
+// State Machine: ตรวจสอบลำดับขั้นตอนสถานะออเดอร์
 // pending → confirmed → cooking → ready → completed
 // -----------------------------------------------------------------------------
 
@@ -191,18 +237,17 @@ func main() {
 	r.GET("/narathon", studentHandler)
 	r.GET("/api/v1/narathon", studentHandler)
 
-	// API v1 Group (จุดที่ 8: ลบเส้นทางที่ไม่มี /api/v1 ออกทั้งหมด)
+	// API v1 Group (ลบเส้นทางที่ไม่มี /api/v1 ออกทั้งหมด)
 	api := r.Group("/api/v1")
 	{
-		// Endpoints ที่ต้องผ่านการตรวจ JWT Authentication
 		authorized := api.Group("")
 		authorized.Use(authMiddleware())
 		{
 			authorized.POST("/orders", createOrderHandler)
 			authorized.GET("/orders", getOrdersHandler)
 			authorized.GET("/orders/:id", getOrderByIDHandler)
-			authorized.GET("/orders/:id/status", getOrderStatusHandler)           // จุดที่ 9
-			authorized.GET("/customers/:id/orders", getCustomerOrdersHandler)     // จุดที่ 9
+			authorized.GET("/orders/:id/status", getOrderStatusHandler)
+			authorized.GET("/customers/:id/orders", getCustomerOrdersHandler)
 			authorized.PATCH("/orders/:id/status", updateOrderStatusHandler)
 			authorized.PUT("/orders/:id/status", updateOrderStatusHandler)
 			authorized.POST("/orders/:id/cancel", cancelOrderHandler)
@@ -236,14 +281,13 @@ func healthHandler(c *gin.Context) {
 	})
 }
 
-// Handler สั่งอาหาร (จุดที่ 1, 2, 3, 5)
+// Handler สั่งอาหาร
 func createOrderHandler(c *gin.Context) {
 	if DB == nil {
 		respondError(c, http.StatusServiceUnavailable, "DATABASE_UNAVAILABLE", "ฐานข้อมูล PostgreSQL ยังไม่พร้อมให้บริการ", nil)
 		return
 	}
 
-	// จุดที่ 2: ดึง customer_id จาก token ไม่ใช่รับจาก body
 	customerID := c.GetString("userID")
 	if customerID == "" {
 		respondError(c, http.StatusUnauthorized, "UNAUTHORIZED", "ไม่พบรหัสผู้ใช้จาก Token", nil)
@@ -256,7 +300,6 @@ func createOrderHandler(c *gin.Context) {
 		return
 	}
 
-	// ตรวจสอบ payment_method
 	if req.PaymentMethod != "cash" && req.PaymentMethod != "promptpay" && req.PaymentMethod != "credit_card" {
 		respondError(c, http.StatusBadRequest, "INVALID_PAYMENT_METHOD", "payment_method ต้องเป็น 'cash', 'promptpay' หรือ 'credit_card' เท่านั้น", nil)
 		return
@@ -265,7 +308,6 @@ func createOrderHandler(c *gin.Context) {
 	var totalPrice float64
 	var orderItems []OrderItem
 
-	// จุดที่ 3: ดึง unit_price / item_name จาก Restaurant Service จริง
 	for _, itemReq := range req.Items {
 		if itemReq.Qty < 1 || itemReq.Qty > 20 {
 			respondError(c, http.StatusBadRequest, "INVALID_QTY", "จำนวนสินค้า (qty) ต้องอยู่ระหว่าง 1 ถึง 20", nil)
@@ -286,13 +328,11 @@ func createOrderHandler(c *gin.Context) {
 			return
 		}
 
-		// ตรวจสอบว่าเมนูนี้เปิดขายอยู่หรือไม่
 		if !menuItem.Available {
 			respondError(c, http.StatusBadRequest, "MENU_ITEM_UNAVAILABLE", fmt.Sprintf("เมนู '%s' ปิดการขายชั่วคราว", menuItem.Name), nil)
 			return
 		}
 
-		// ตรวจสอบว่าเมนูนี้สังกัดร้านที่กำลังสั่งจริง
 		if menuItem.RestaurantID != "" && menuItem.RestaurantID != req.RestaurantID {
 			respondError(c, http.StatusBadRequest, "INVALID_RESTAURANT_ITEM", fmt.Sprintf("เมนู '%s' ไม่ได้เป็นของร้านที่เลือก", menuItem.Name), nil)
 			return
@@ -303,8 +343,8 @@ func createOrderHandler(c *gin.Context) {
 
 		orderItems = append(orderItems, OrderItem{
 			MenuItemID: itemReq.MenuItemID,
-			ItemName:   menuItem.Name,  // Snapshot ชื่อจริงจาก Restaurant Service
-			UnitPrice:  menuItem.Price, // Snapshot ราคาจริงจาก Restaurant Service
+			ItemName:   menuItem.Name,
+			UnitPrice:  menuItem.Price,
 			Qty:        itemReq.Qty,
 			Note:       itemReq.Note,
 			Subtotal:   subtotal,
@@ -312,7 +352,7 @@ func createOrderHandler(c *gin.Context) {
 	}
 
 	order := Order{
-		CustomerID:      customerID, // จาก JWT
+		CustomerID:      customerID,
 		RestaurantID:    req.RestaurantID,
 		DeliveryAddress: req.DeliveryAddress,
 		PaymentMethod:   req.PaymentMethod,
@@ -329,7 +369,7 @@ func createOrderHandler(c *gin.Context) {
 	respondSuccess(c, http.StatusCreated, "สร้างออเดอร์เรียบร้อยแล้ว", order)
 }
 
-// Handler ดึงรายการออเดอร์ทั้งหมด
+// Handler ดึงรายการออเดอร์ทั้งหมด (Ownership Check ทั้ง Customer และ Restaurant Owner)
 func getOrdersHandler(c *gin.Context) {
 	if DB == nil {
 		respondError(c, http.StatusServiceUnavailable, "DATABASE_UNAVAILABLE", "ฐานข้อมูล PostgreSQL ยังไม่พร้อมให้บริการ", nil)
@@ -342,15 +382,36 @@ func getOrdersHandler(c *gin.Context) {
 	var orders []Order
 	query := DB.Preload("Items").Order("created_at DESC")
 
-	// จุดที่ 4 (Ownership check): ลูกค้าทั่วไปดูได้เฉพาะออเดอร์ของตนเอง
 	if currentUserRole == "customer" {
 		query = query.Where("customer_id = ?", currentUserID)
+	} else if currentUserRole == "restaurant_owner" {
+		restaurantID := c.Query("restaurant_id")
+		if restaurantID == "" {
+			respondError(c, http.StatusBadRequest, "MISSING_RESTAURANT_ID", "กรุณาระบุ restaurant_id สำหรับดูออเดอร์ของร้าน", nil)
+			return
+		}
+		restaurant, err := fetchRestaurant(restaurantID)
+		if err != nil {
+			if errors.Is(err, ErrRestaurantUnavailable) {
+				respondError(c, http.StatusServiceUnavailable, "RESTAURANT_SERVICE_UNAVAILABLE", "ไม่สามารถติดต่อ Restaurant Service เพื่อตรวจสอบสิทธิ์เจ้าของร้านได้", nil)
+				return
+			}
+			respondError(c, http.StatusForbidden, "FORBIDDEN", "ไม่สามารถตรวจสอบสิทธิ์เจ้าของร้านได้", nil)
+			return
+		}
+		if restaurant.OwnerID != currentUserID {
+			respondError(c, http.StatusForbidden, "FORBIDDEN", "คุณไม่ใช่เจ้าของร้านนี้ ไม่มีสิทธิ์ดูรายการออเดอร์", nil)
+			return
+		}
+		query = query.Where("restaurant_id = ?", restaurantID)
 	} else if customerID := c.Query("customer_id"); customerID != "" {
 		query = query.Where("customer_id = ?", customerID)
 	}
 
-	if restaurantID := c.Query("restaurant_id"); restaurantID != "" {
-		query = query.Where("restaurant_id = ?", restaurantID)
+	if currentUserRole != "restaurant_owner" {
+		if restaurantID := c.Query("restaurant_id"); restaurantID != "" {
+			query = query.Where("restaurant_id = ?", restaurantID)
+		}
 	}
 
 	if status := c.Query("status"); status != "" {
@@ -365,7 +426,7 @@ func getOrdersHandler(c *gin.Context) {
 	respondSuccess(c, http.StatusOK, "ดึงรายการออเดอร์สำเร็จ", orders)
 }
 
-// Handler ดึงออเดอร์ตาม ID (จุดที่ 4: Ownership Check)
+// Handler ดึงออเดอร์ตาม ID (Ownership Check ทั้ง Customer และ Restaurant Owner)
 func getOrderByIDHandler(c *gin.Context) {
 	if DB == nil {
 		respondError(c, http.StatusServiceUnavailable, "DATABASE_UNAVAILABLE", "ฐานข้อมูล PostgreSQL ยังไม่พร้อมให้บริการ", nil)
@@ -379,18 +440,34 @@ func getOrderByIDHandler(c *gin.Context) {
 		return
 	}
 
-	// จุดที่ 4 (Ownership Check): ลูกค้าดูได้เฉพาะออเดอร์ของตนเอง
 	currentUserID := c.GetString("userID")
 	currentUserRole := c.GetString("userRole")
-	if currentUserRole == "customer" && order.CustomerID != currentUserID {
-		respondError(c, http.StatusForbidden, "FORBIDDEN", "คุณไม่มีสิทธิ์เข้าถึงออเดอร์นี้", nil)
-		return
+
+	if currentUserRole == "customer" {
+		if order.CustomerID != currentUserID {
+			respondError(c, http.StatusForbidden, "FORBIDDEN", "คุณไม่มีสิทธิ์เข้าถึงออเดอร์นี้", nil)
+			return
+		}
+	} else if currentUserRole == "restaurant_owner" {
+		restaurant, err := fetchRestaurant(order.RestaurantID)
+		if err != nil {
+			if errors.Is(err, ErrRestaurantUnavailable) {
+				respondError(c, http.StatusServiceUnavailable, "RESTAURANT_SERVICE_UNAVAILABLE", "ไม่สามารถติดต่อ Restaurant Service เพื่อตรวจสอบสิทธิ์เจ้าของร้านได้", nil)
+				return
+			}
+			respondError(c, http.StatusForbidden, "FORBIDDEN", "ไม่สามารถตรวจสอบสิทธิ์เจ้าของร้านได้", nil)
+			return
+		}
+		if restaurant.OwnerID != currentUserID {
+			respondError(c, http.StatusForbidden, "FORBIDDEN", "คุณไม่ใช่เจ้าของร้านของออเดอร์นี้ ไม่มีสิทธิ์เข้าถึงข้อมูล", nil)
+			return
+		}
 	}
 
 	respondSuccess(c, http.StatusOK, "ดึงข้อมูลออเดอร์สำเร็จ", order)
 }
 
-// Handler ดึงสถานะออเดอร์ตาม ID (จุดที่ 9)
+// Handler ดึงสถานะออเดอร์ตาม ID (Ownership Check ทั้ง Customer และ Restaurant Owner)
 func getOrderStatusHandler(c *gin.Context) {
 	if DB == nil {
 		respondError(c, http.StatusServiceUnavailable, "DATABASE_UNAVAILABLE", "ฐานข้อมูล PostgreSQL ยังไม่พร้อมให้บริการ", nil)
@@ -399,17 +476,33 @@ func getOrderStatusHandler(c *gin.Context) {
 
 	id := c.Param("id")
 	var order Order
-	if err := DB.Select("id", "customer_id", "status", "updated_at").First(&order, "id = ?", id).Error; err != nil {
+	if err := DB.Select("id", "customer_id", "restaurant_id", "status", "updated_at").First(&order, "id = ?", id).Error; err != nil {
 		respondError(c, http.StatusNotFound, "ORDER_NOT_FOUND", "ไม่พบออเดอร์รหัสนี้", nil)
 		return
 	}
 
-	// จุดที่ 4: Ownership Check
 	currentUserID := c.GetString("userID")
 	currentUserRole := c.GetString("userRole")
-	if currentUserRole == "customer" && order.CustomerID != currentUserID {
-		respondError(c, http.StatusForbidden, "FORBIDDEN", "คุณไม่มีสิทธิ์เข้าถึงสถานะออเดอร์นี้", nil)
-		return
+
+	if currentUserRole == "customer" {
+		if order.CustomerID != currentUserID {
+			respondError(c, http.StatusForbidden, "FORBIDDEN", "คุณไม่มีสิทธิ์เข้าถึงสถานะออเดอร์นี้", nil)
+			return
+		}
+	} else if currentUserRole == "restaurant_owner" {
+		restaurant, err := fetchRestaurant(order.RestaurantID)
+		if err != nil {
+			if errors.Is(err, ErrRestaurantUnavailable) {
+				respondError(c, http.StatusServiceUnavailable, "RESTAURANT_SERVICE_UNAVAILABLE", "ไม่สามารถติดต่อ Restaurant Service เพื่อตรวจสอบสิทธิ์เจ้าของร้านได้", nil)
+				return
+			}
+			respondError(c, http.StatusForbidden, "FORBIDDEN", "ไม่สามารถตรวจสอบสิทธิ์เจ้าของร้านได้", nil)
+			return
+		}
+		if restaurant.OwnerID != currentUserID {
+			respondError(c, http.StatusForbidden, "FORBIDDEN", "คุณไม่ใช่เจ้าของร้านของออเดอร์นี้ ไม่มีสิทธิ์เข้าถึงสถานะ", nil)
+			return
+		}
 	}
 
 	respondSuccess(c, http.StatusOK, "ดึงสถานะออเดอร์สำเร็จ", gin.H{
@@ -419,7 +512,7 @@ func getOrderStatusHandler(c *gin.Context) {
 	})
 }
 
-// Handler ดึงออเดอร์ของลูกค้าเฉพาะราย (จุดที่ 9)
+// Handler ดึงออเดอร์ของลูกค้าเฉพาะราย
 func getCustomerOrdersHandler(c *gin.Context) {
 	if DB == nil {
 		respondError(c, http.StatusServiceUnavailable, "DATABASE_UNAVAILABLE", "ฐานข้อมูล PostgreSQL ยังไม่พร้อมให้บริการ", nil)
@@ -430,7 +523,6 @@ func getCustomerOrdersHandler(c *gin.Context) {
 	currentUserID := c.GetString("userID")
 	currentUserRole := c.GetString("userRole")
 
-	// จุดที่ 4: Ownership Check - ลูกค้าดูได้แค่ของตัวเอง ยกเว้น Admin
 	if currentUserRole == "customer" && currentUserID != targetCustomerID {
 		respondError(c, http.StatusForbidden, "FORBIDDEN", "คุณไม่มีสิทธิ์เข้าถึงข้อมูลของลูกค้ารายอื่น", nil)
 		return
@@ -445,7 +537,7 @@ func getCustomerOrdersHandler(c *gin.Context) {
 	respondSuccess(c, http.StatusOK, "ดึงรายการออเดอร์ของลูกค้าสำเร็จ", orders)
 }
 
-// Handler อัปเดตสถานะออเดอร์ (จุดที่ 4, 6)
+// Handler อัปเดตสถานะออเดอร์ (Ownership Check ฝั่ง Restaurant Owner)
 func updateOrderStatusHandler(c *gin.Context) {
 	if DB == nil {
 		respondError(c, http.StatusServiceUnavailable, "DATABASE_UNAVAILABLE", "ฐานข้อมูล PostgreSQL ยังไม่พร้อมให้บริการ", nil)
@@ -453,7 +545,8 @@ func updateOrderStatusHandler(c *gin.Context) {
 	}
 
 	currentUserRole := c.GetString("userRole")
-	// ลูกค้าทั่วไปไม่สามารถเปลี่ยนสถานะออเดอร์ได้เอง (ต้องใช้ cancel แทน)
+	currentUserID := c.GetString("userID")
+
 	if currentUserRole == "customer" {
 		respondError(c, http.StatusForbidden, "FORBIDDEN", "ลูกค้าไม่สามารถแก้ไขสถานะออเดอร์นี้ได้โดยตรง (ใช้ยกเลิกออเดอร์แทน)", nil)
 		return
@@ -472,7 +565,24 @@ func updateOrderStatusHandler(c *gin.Context) {
 		return
 	}
 
-	// จุดที่ 6: ตรวจสอบลำดับการเปลี่ยนสถานะ ห้ามข้ามขั้น
+	// Ownership check: ถ้าเป็น restaurant_owner ต้องเป็นเจ้าของร้านจริง
+	if currentUserRole == "restaurant_owner" {
+		restaurant, err := fetchRestaurant(order.RestaurantID)
+		if err != nil {
+			if errors.Is(err, ErrRestaurantUnavailable) {
+				respondError(c, http.StatusServiceUnavailable, "RESTAURANT_SERVICE_UNAVAILABLE", "ไม่สามารถติดต่อ Restaurant Service เพื่อตรวจสอบสิทธิ์เจ้าของร้านได้", nil)
+				return
+			}
+			respondError(c, http.StatusForbidden, "FORBIDDEN", "ไม่สามารถตรวจสอบสิทธิ์เจ้าของร้านได้", nil)
+			return
+		}
+		if restaurant.OwnerID != currentUserID {
+			respondError(c, http.StatusForbidden, "FORBIDDEN", "คุณไม่ใช่เจ้าของร้านของออเดอร์นี้ ไม่มีสิทธิ์แก้ไขสถานะ", nil)
+			return
+		}
+	}
+
+	// ตรวจสอบลำดับการเปลี่ยนสถานะ ห้ามข้ามขั้น
 	if !isValidTransition(order.Status, req.Status) {
 		respondError(c, http.StatusBadRequest, "INVALID_STATUS_TRANSITION",
 			fmt.Sprintf("ไม่สามารถเปลี่ยนสถานะจาก '%s' ไปเป็น '%s' ได้ตามลำดับวงจรชีวิตของออเดอร์", order.Status, req.Status), nil)
@@ -490,7 +600,7 @@ func updateOrderStatusHandler(c *gin.Context) {
 	})
 }
 
-// Handler ขอยกเลิกออเดอร์ (จุดที่ 4, 7)
+// Handler ขอยกเลิกออเดอร์
 func cancelOrderHandler(c *gin.Context) {
 	if DB == nil {
 		respondError(c, http.StatusServiceUnavailable, "DATABASE_UNAVAILABLE", "ฐานข้อมูล PostgreSQL ยังไม่พร้อมให้บริการ", nil)
@@ -504,7 +614,6 @@ func cancelOrderHandler(c *gin.Context) {
 		return
 	}
 
-	// จุดที่ 4 (Ownership Check): ลูกค้าสามารถยกเลิกได้เฉพาะออเดอร์ของตนเอง
 	currentUserID := c.GetString("userID")
 	currentUserRole := c.GetString("userRole")
 	if currentUserRole == "customer" && order.CustomerID != currentUserID {
@@ -512,7 +621,6 @@ func cancelOrderHandler(c *gin.Context) {
 		return
 	}
 
-	// จุดที่ 7: ยกเลิกได้เฉพาะสถานะ pending หรือ confirmed เท่านั้น
 	if order.Status != "pending" && order.Status != "confirmed" {
 		respondError(c, http.StatusBadRequest, "ORDER_CANNOT_BE_CANCELLED",
 			fmt.Sprintf("ไม่สามารถยกเลิกออเดอร์ได้ เนื่องจากสถานะปัจจุบันคือ '%s' (ยกเลิกได้เฉพาะ pending หรือ confirmed เท่านั้น)", order.Status), nil)

@@ -1,4 +1,5 @@
 # Binaries
+order-service
 go_lang_project
 *.exe
 *.exe~
